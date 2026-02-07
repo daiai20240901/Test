@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 
 const MENU_STORAGE_KEY = "training-menus";
 const RECORD_STORAGE_KEY = "training-records";
@@ -21,6 +21,8 @@ type ExportData = {
 
 const createId = () => crypto.randomUUID();
 
+const todayISO = () => new Date().toISOString().slice(0, 10);
+
 const sortRecords = (records: RecordItem[]) =>
   [...records].sort((a, b) => {
     if (a.date === b.date) {
@@ -29,60 +31,118 @@ const sortRecords = (records: RecordItem[]) =>
     return b.date.localeCompare(a.date);
   });
 
-const readMenus = () => {
-  const raw = localStorage.getItem(MENU_STORAGE_KEY);
-  if (!raw) {
-    return DEFAULT_MENUS;
-  }
+const safeParseJSON = <T,>(raw: string): T | null => {
   try {
-    const parsed = JSON.parse(raw) as string[];
-    if (Array.isArray(parsed) && parsed.length > 0) {
-      return parsed;
-    }
+    return JSON.parse(raw) as T;
   } catch {
-    return DEFAULT_MENUS;
+    return null;
+  }
+};
+
+const readMenus = (): string[] => {
+  const raw = localStorage.getItem(MENU_STORAGE_KEY);
+  if (!raw) return DEFAULT_MENUS;
+  const parsed = safeParseJSON<unknown>(raw);
+  if (Array.isArray(parsed)) {
+    const cleaned = parsed
+      .filter((m) => typeof m === "string")
+      .map((m) => m.trim())
+      .filter(Boolean);
+    return cleaned.length > 0 ? cleaned : DEFAULT_MENUS;
   }
   return DEFAULT_MENUS;
 };
 
-const readRecords = () => {
+const readRecords = (): RecordItem[] => {
   const raw = localStorage.getItem(RECORD_STORAGE_KEY);
-  if (!raw) {
-    return [] as RecordItem[];
-  }
-  try {
-    const parsed = JSON.parse(raw) as RecordItem[];
-    if (Array.isArray(parsed)) {
-      return parsed;
-    }
-  } catch {
-    return [] as RecordItem[];
-  }
-  return [] as RecordItem[];
+  if (!raw) return [];
+  const parsed = safeParseJSON<unknown>(raw);
+  if (!Array.isArray(parsed)) return [];
+
+  // できるだけ壊れてても救う
+  const cleaned = parsed
+    .filter((r) => r && typeof r === "object")
+    .map((r: any) => {
+      const date = typeof r.date === "string" ? r.date : "";
+      const menu = typeof r.menu === "string" ? r.menu : "";
+      const weight = Number(r.weight);
+      const reps = Number(r.reps);
+      const createdAt = typeof r.createdAt === "number" ? r.createdAt : Date.now();
+      const id = typeof r.id === "string" ? r.id : createId();
+
+      return {
+        id,
+        date,
+        menu,
+        weight: Number.isFinite(weight) ? weight : 0,
+        reps: Number.isFinite(reps) ? reps : 0,
+        createdAt,
+      } satisfies RecordItem;
+    })
+    .filter((r) => r.date && r.menu && r.weight > 0 && r.reps > 0);
+
+  return cleaned;
+};
+
+const normalizeImport = (data: ExportData) => {
+  const menusRaw = Array.isArray(data.menus) ? data.menus : [];
+  const nextMenus = menusRaw
+    .filter((m) => typeof m === "string")
+    .map((m) => m.trim())
+    .filter(Boolean);
+
+  const finalMenus = nextMenus.length > 0 ? nextMenus : DEFAULT_MENUS;
+
+  const recordsRaw = Array.isArray(data.records) ? data.records : [];
+  const nextRecords = recordsRaw
+    .filter((r) => r && typeof r === "object")
+    .map((r: any) => {
+      const date = typeof r.date === "string" ? r.date : "";
+      const menu = typeof r.menu === "string" ? r.menu : finalMenus[0] ?? "";
+      const weight = Number(r.weight);
+      const reps = Number(r.reps);
+      const createdAt = typeof r.createdAt === "number" ? r.createdAt : Date.now();
+      const id = typeof r.id === "string" ? r.id : createId();
+
+      return {
+        id,
+        date,
+        menu,
+        weight: Number.isFinite(weight) ? weight : 0,
+        reps: Number.isFinite(reps) ? reps : 0,
+        createdAt,
+      } satisfies RecordItem;
+    })
+    .filter((r) => r.date && r.menu && r.weight > 0 && r.reps > 0);
+
+  return { finalMenus, nextRecords };
 };
 
 export default function App() {
-  const [menus, setMenus] = useState<string[]>([]);
-  const [records, setRecords] = useState<RecordItem[]>([]);
+  // ★ 初期値を localStorage から直接読む（初期化useEffect不要）
+  const [menus, setMenus] = useState<string[]>(readMenus);
+  const [records, setRecords] = useState<RecordItem[]>(readRecords);
+
   const [menuInput, setMenuInput] = useState("");
-  const [date, setDate] = useState("");
-  const [menu, setMenu] = useState("");
+  const [date, setDate] = useState(todayISO);
+  const [menu, setMenu] = useState(() => readMenus()[0] ?? "");
   const [weight, setWeight] = useState("");
   const [reps, setReps] = useState("");
   const [errors, setErrors] = useState<string[]>([]);
   const [importError, setImportError] = useState<string | null>(null);
 
+  // ★ menus 変更時に保存（空のときは保存しない）
   useEffect(() => {
-    const storedMenus = readMenus();
-    setMenus(storedMenus);
-    setMenu(storedMenus[0] ?? "");
-    setRecords(readRecords());
-  }, []);
+    if (menus.length > 0) {
+      localStorage.setItem(MENU_STORAGE_KEY, JSON.stringify(menus));
+    }
+    // 選択中メニューが消えたら先頭へ
+    if (menus.length > 0 && !menus.includes(menu)) {
+      setMenu(menus[0]);
+    }
+  }, [menus]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  useEffect(() => {
-    localStorage.setItem(MENU_STORAGE_KEY, JSON.stringify(menus));
-  }, [menus]);
-
+  // ★ records 変更時に保存
   useEffect(() => {
     localStorage.setItem(RECORD_STORAGE_KEY, JSON.stringify(records));
   }, [records]);
@@ -108,37 +168,39 @@ export default function App() {
 
   const handleDeleteMenu = (target: string) => {
     const nextMenus = menus.filter((item) => item !== target);
-    setMenus(nextMenus);
-    if (menu === target) {
-      setMenu(nextMenus[0] ?? "");
+    const finalMenus = nextMenus.length > 0 ? nextMenus : DEFAULT_MENUS;
+
+    setMenus(finalMenus);
+
+    // 選択中が消えたら先頭へ
+    if (!finalMenus.includes(menu)) {
+      setMenu(finalMenus[0] ?? "");
     }
   };
 
   const validateRecord = () => {
     const nextErrors: string[] = [];
-    if (!date) {
-      nextErrors.push("日付は必須です。");
-    }
-    if (!menu) {
-      nextErrors.push("メニューを選択してください。");
-    }
+    if (!date) nextErrors.push("日付は必須です。");
+    if (!menu) nextErrors.push("メニューを選択してください。");
+
     const weightValue = Number(weight);
     if (!weight || Number.isNaN(weightValue) || weightValue <= 0) {
       nextErrors.push("重量は0より大きい数を入力してください。");
     }
+
     const repsValue = Number(reps);
     if (!reps || Number.isNaN(repsValue) || repsValue <= 0) {
       nextErrors.push("回数は0より大きい数を入力してください。");
     }
+
     setErrors(nextErrors);
     return nextErrors.length === 0;
   };
 
   const handleAddRecord = (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (!validateRecord()) {
-      return;
-    }
+    if (!validateRecord()) return;
+
     const newRecord: RecordItem = {
       id: createId(),
       date,
@@ -147,7 +209,11 @@ export default function App() {
       reps: Number(reps),
       createdAt: Date.now(),
     };
-    setRecords((prev) => [...prev, newRecord]);
+
+    // ★ 新しいのを先頭に
+    setRecords((prev) => [newRecord, ...prev]);
+
+    // ★ 次の入力が楽になるように：重量/回数だけクリア、日付/メニューは残す
     setWeight("");
     setReps("");
     setErrors([]);
@@ -172,25 +238,31 @@ export default function App() {
 
   const handleImport = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
-    if (!file) {
-      return;
-    }
+    if (!file) return;
+
     const reader = new FileReader();
     reader.onload = () => {
       try {
         const parsed = JSON.parse(reader.result as string) as ExportData;
-        if (!Array.isArray(parsed.menus) || !Array.isArray(parsed.records)) {
+        if (!parsed || typeof parsed !== "object") {
           setImportError("不正なJSON形式です。");
           return;
         }
-        setMenus(parsed.menus);
-        setMenu(parsed.menus[0] ?? "");
-        setRecords(parsed.records);
+
+        // ★ バリデーションしつつ復元
+        const { finalMenus, nextRecords } = normalizeImport(parsed);
+
+        setMenus(finalMenus);
+        setMenu(finalMenus[0] ?? "");
+        setRecords(nextRecords);
+
         setImportError(null);
+        setErrors([]);
       } catch {
         setImportError("JSONの読み込みに失敗しました。");
       }
     };
+
     reader.readAsText(file);
     event.target.value = "";
   };
@@ -287,6 +359,7 @@ export default function App() {
           </label>
           <button type="submit">追加</button>
         </form>
+
         {errors.length > 0 && (
           <ul className="error-list">
             {errors.map((error) => (
